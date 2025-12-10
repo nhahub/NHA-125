@@ -1,0 +1,196 @@
+CREATE DATABASE IF NOT EXISTS HealthCare;
+USE HealthCare;
+
+-- ==========================
+-- STAGING TABLE
+-- ==========================
+CREATE TABLE stagging_healthCare(
+	Name VARCHAR(255),
+    Age VARCHAR(255),
+	Gender VARCHAR(255),
+	Blood_Type VARCHAR(255),
+	Medical_Condition VARCHAR(255),
+	Data_of_Admission VARCHAR(255),
+	Doctor VARCHAR(255),
+	Hospital VARCHAR(255),
+	Insurance_Provider VARCHAR(255),
+	Billing_Amount VARCHAR(255),
+	Room_Number VARCHAR(255),
+	Admission_Type VARCHAR(255),
+	Discharge_Date VARCHAR(255),
+	Medication VARCHAR(255),
+	Test_Results VARCHAR(255)
+);
+
+-- ==========================
+-- DUPLICATE CHECKS
+-- ==========================
+CREATE VIEW Fully_Duplicated_Rows AS 
+SELECT 
+	Name,Age,Gender,Blood_Type,Medical_Condition,Data_of_Admission,Doctor,Hospital,
+    Insurance_Provider,Billing_Amount,Room_Number,Admission_Type,Discharge_Date,Medication,Test_Results,
+	COUNT(*) AS duplicated
+FROM stagging_healthCare
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+HAVING COUNT(*) > 1;
+
+-- 2nd Layer
+SELECT 
+	Name,Gender,Blood_Type,Medical_Condition,Data_of_Admission,Doctor,Hospital,Insurance_Provider,
+    Billing_Amount,Room_Number,Admission_Type,Discharge_Date,Medication,Test_Results,
+	MAX(Age) AS Max_age,
+	MIN(Age) AS Min_age,
+	COUNT(*) AS duplicated
+FROM stagging_healthCare
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14
+HAVING COUNT(*) > 1;
+
+-- Third duplicated layer
+SELECT 
+	Name,Gender,Blood_Type, 
+    MAX(Data_of_Admission) AS RecentAdmission,
+	MIN(Data_of_Admission) AS OldAdmission,
+	COUNT(*) AS duplicated
+FROM stagging_healthCare
+GROUP BY 1,2,3 
+HAVING COUNT(*) > 1;
+
+
+-- DIMENSION TABLES
+
+
+CREATE TABLE dim_Patient (
+    PatientID INT PRIMARY KEY AUTO_INCREMENT,
+    PatientSourceID VARCHAR(255) NULL,
+    Name VARCHAR(255),
+    Gender VARCHAR(255),
+    Blood_Type VARCHAR(255),
+    Age INT,
+    Medical_Condition VARCHAR(255),
+	CONSTRAINT uc_Patient UNIQUE (PatientSourceID, Name, Blood_Type)
+);
+
+CREATE TABLE dim_Doctor (
+    DoctorID INT PRIMARY KEY AUTO_INCREMENT,
+    Doctor VARCHAR(255)
+);
+
+CREATE TABLE dim_Hospital (
+    HospitalID INT PRIMARY KEY AUTO_INCREMENT,
+    Hospital VARCHAR(255)
+);
+
+CREATE TABLE dim_InsuranceProvider (
+    InsuranceProviderID INT PRIMARY KEY AUTO_INCREMENT,
+    Insurance_Provider VARCHAR(255)
+);
+
+
+-- FACT TABLE
+
+CREATE TABLE fact_Admission (
+    AdmissionID INT PRIMARY KEY AUTO_INCREMENT,
+    PatientID INT,
+    DoctorID INT,
+    HospitalID INT,
+    InsuranceProviderID INT,
+    MedicationID INT,
+    Age INT,
+    Billing_Amount DECIMAL(10,2),
+    Room_Number VARCHAR(50),
+    Admission_Type VARCHAR(255),
+    Data_of_Admission DATE,
+    Discharge_Date DATE,
+    Test_Results VARCHAR(255),
+    
+    FOREIGN KEY (PatientID) REFERENCES dim_Patient(PatientID),
+    FOREIGN KEY (DoctorID) REFERENCES dim_Doctor(DoctorID),
+    FOREIGN KEY (HospitalID) REFERENCES dim_Hospital(HospitalID),
+    FOREIGN KEY (InsuranceProviderID) REFERENCES dim_InsuranceProvider(InsuranceProviderID)
+);
+
+
+-- Insert Into Dimensions
+
+INSERT INTO dim_Doctor (Doctor)
+SELECT DISTINCT TRIM(Doctor)
+FROM stagging_healthCare
+WHERE Doctor IS NOT NULL AND TRIM(Doctor) <> '';
+
+INSERT INTO dim_Hospital (Hospital)
+SELECT DISTINCT TRIM(Hospital)
+FROM stagging_healthCare
+WHERE Hospital IS NOT NULL AND TRIM(Hospital) <> '';
+
+INSERT INTO dim_InsuranceProvider (Insurance_Provider)
+SELECT DISTINCT TRIM(Insurance_Provider)
+FROM stagging_healthCare
+WHERE Insurance_Provider IS NOT NULL AND TRIM(Insurance_Provider) <> '';
+
+INSERT INTO dim_Patient (PatientSourceID, Name, Gender, Blood_Type, Age, Medical_Condition)    
+WITH RankedPatients AS (
+    SELECT 
+        Name,
+        Age,
+        Gender,
+        Blood_Type,
+        Medical_Condition,
+        ROW_NUMBER() OVER(
+            PARTITION BY 
+                TRIM(Name),
+                TRIM(Gender),
+                TRIM(Blood_Type)
+            ORDER BY STR_TO_DATE(TRIM(Data_of_Admission), '%m/%d/%Y') DESC        
+        ) AS rn
+    FROM stagging_healthCare 
+    WHERE 
+      Name IS NOT NULL AND TRIM(Name) <> '' 
+)
+SELECT 
+    CONCAT_WS('_', TRIM(Name), TRIM(Gender), TRIM(Blood_Type)) AS PatientSourceID,
+    TRIM(Name) AS Name,
+    TRIM(Gender) AS Gender,
+    TRIM(Blood_Type) AS Blood_Type,
+    TRIM(Age) AS Age,
+    TRIM(Medical_Condition) AS Medical_Condition
+FROM RankedPatients 
+WHERE rn = 1;
+
+
+INSERT INTO fact_Admission (
+    PatientID,
+    DoctorID,
+    HospitalID,
+    InsuranceProviderID,
+    Age,
+    Billing_Amount,
+    Room_Number,
+    Admission_Type,
+    Data_of_Admission,
+    Discharge_Date,
+    Test_Results
+)
+SELECT
+    p.PatientID,
+    d.DoctorID,
+    h.HospitalID,
+    i.InsuranceProviderID,
+    CAST(TRIM(s.Age) AS UNSIGNED) AS Age,
+    CAST(TRIM(s.Billing_Amount) AS DECIMAL(10,2)) AS Billing_Amount,
+    TRIM(s.Room_Number),
+    TRIM(s.Admission_Type),
+    STR_TO_DATE(TRIM(s.Data_of_Admission), '%m/%d/%Y') AS Data_of_Admission,
+    STR_TO_DATE(TRIM(s.Discharge_Date), '%m/%d/%Y') AS Discharge_Date,
+    TRIM(s.Test_Results)
+FROM stagging_healthCare s
+LEFT JOIN dim_Patient p
+    ON p.PatientSourceID = CONCAT_WS('_', TRIM(s.Name), TRIM(s.Gender), TRIM(s.Blood_Type))
+LEFT JOIN dim_Doctor d
+    ON TRIM(d.Doctor) = TRIM(s.Doctor)
+LEFT JOIN dim_Hospital h
+    ON TRIM(h.Hospital) = TRIM(s.Hospital)
+LEFT JOIN dim_InsuranceProvider i
+    ON TRIM(i.Insurance_Provider) = TRIM(s.Insurance_Provider)
+WHERE
+    s.Name IS NOT NULL AND TRIM(s.Name) <> ''
+    AND s.Data_of_Admission IS NOT NULL AND TRIM(s.Data_of_Admission) <> '';
